@@ -1,0 +1,275 @@
+### STEP 1 - CREATING ACCESS TO AWS S3 AND AWS EC2 INSTANCES ###
+
+# 1.1 Defining access parameters and login credentials - The values have been deleted by me for security purposes
+ACCESS_KEY = ""
+SECRET_KEY = ""
+ENCODED_SECRET_KEY = SECRET_KEY.replace("/", "%2F")
+AWS_BUCKET_NAME = ""
+MOUNT_NAME = ""
+
+# 1.2 Mounting the AWS S3 bucket
+dbutils.fs.mount("s3a://%s:%s@%s" % (ACCESS_KEY, ENCODED_SECRET_KEY, AWS_BUCKET_NAME), "/mnt/%s" % MOUNT_NAME)
+
+# 1.3 Importing the required Spark modules
+from pyspark import SparkContext
+from pyspark.sql import SparkSession
+spark = SparkSession(sc)
+
+# 1.4 Display the contents of the AWS S3 bucket
+display(dbutils.fs.ls("/mnt/%s" % MOUNT_NAME))
+
+### STEP 2 - Loading & Transforming the training and test data sets ###
+# 2.1 Loading the training set
+train = spark.read.format("csv").load("/mnt/%s/training.txt" % MOUNT_NAME,header = None, sep="\t")
+
+# 2.2 Changing the column names and value formats of the training set
+train = train.withColumn("Clicks", train["_c0"].cast("int")) 
+train = train.withColumn("Impressions", train["_c1"].cast("int"))
+train = train.withColumn("DisplayURL", train["_c2"])
+train = train.withColumn("AdID", train["_c3"].cast("int"))
+train = train.withColumn("AdvertiserID", train["_c4"].cast("int"))
+train = train.withColumn("Depth", train["_c5"].cast("int"))
+train = train.withColumn("Position", train["_c6"].cast("int"))
+train = train.withColumn("QueryID", train["_c7"].cast("int"))
+train = train.withColumn("KeywordID", train["_c8"].cast("int"))
+train = train.withColumn("TitleID", train["_c9"].cast("int"))
+train = train.withColumn("DescriptionID", train["_c10"].cast("int"))
+train = train.withColumn("UserID", train["_c11"].cast("int"))
+cols = ["Clicks","Impressions","DisplayURL","AdID","AdvertiserID","Depth","Position","QueryID","KeywordID","TitleID","DescriptionID","UserID"]
+train = train.select(cols)
+
+# 2.3 Creating a SparkSQL table and separating unidentifiable users
+train.createOrReplaceTempView('train_tbl')
+train = spark.sql("SELECT * FROM train_tbl WHERE UserID > 0")
+train_unidentified = spark.sql("SELECT * FROM train_tbl WHERE UserID = 0")
+
+# 2.4 Loading the test dataset
+test = spark.read.format("csv").load("/mnt/%s/test.txt" % MOUNT_NAME,header = None, sep="\t")
+
+# 2.5 Changing the column names and value formats of the test set and separating the unidentifiable users
+test = test.withColumn("DisplayURL", test["_c0"])
+test = test.withColumn("AdID", test["_c1"].cast("int"))
+test = test.withColumn("AdvertiserID", test["_c2"].cast("int"))
+test = test.withColumn("Depth", test["_c3"].cast("int"))
+test = test.withColumn("Position", test["_c4"].cast("int"))
+test = test.withColumn("QueryID", test["_c5"].cast("int"))
+test = test.withColumn("KeywordID", test["_c6"].cast("int"))
+test = test.withColumn("TitleID", test["_c7"].cast("int"))
+test = test.withColumn("DescriptionID", test["_c8"].cast("int"))
+test = test.withColumn("UserID", test["_c9"].cast("int"))
+cols_test = ["DisplayURL","AdID","AdvertiserID","Depth","Position","QueryID","KeywordID","TitleID","DescriptionID","UserID"]
+test = test.select(cols_test)
+test.createOrReplaceTempView('test_tbl')
+test = spark.sql("SELECT * FROM test_tbl WHERE UserID > 0")
+test_unidentified = spark.sql("SELECT * FROM test_tbl WHERE UserID = 0")
+test.createOrReplaceTempView('test_tbl')
+
+### STEP 3 - Part 1 & Part 2 of assignment: Grouping and reducing the data sets by the requested identifiers ###
+# 3.1 Grouping the training set by the identifiers requested in the assignment
+train_grouped = train.groupBy("UserID","AdID","QueryID","Depth","Position").sum("Clicks","Impressions")
+train_grouped = train_grouped.withColumn("Clicks", train_grouped["sum(Clicks)"])
+train_grouped = train_grouped.withColumn("Impressions", train_grouped["sum(Impressions)"])
+train_grouped = train_grouped.select("UserID", "AdID", "QueryID", "Depth", "Position", "Clicks", "Impressions")
+
+# 3.2 Creating a SparkSQL table view of the grouped training set for later use
+train_grouped.createOrReplaceTempView("train_grouped_tbl")
+
+# 3.3 Adding a calculated column to the train_grouped table that is a measure of Depth & Position for later use
+train_grouped = spark.sql("SELECT UserID, AdID, QueryID, Depth, Position, Clicks, Impressions, ((Depth-Position)/Depth) AS DepthPos FROM train_grouped_tbl GROUP BY 1,2,3,4,5,6,7")
+train_grouped.createOrReplaceTempView("train_grouped_tbl")
+
+# 3.4 Grouping the test set by the requested identifiers
+test_grouped = spark.sql("SELECT UserID, AdID, QueryID, Depth, Position, ((Depth-Position)/Depth) AS DepthPos FROM test_tbl GROUP BY 1,2,3,4,5")
+
+### STEP 4 - Computing the position and depth normalized click-through-rates for each identifier
+# 4.1 Create the CTR's for every identifier and combination of identifier (Identifiers: 5, Combinations: 5), the chosen conjunctions of identifiers: User-Ad-Query-ID, User-Ad-ID, Ad-Query-ID, User-Query-ID, Position-Depth
+ctr_all = spark.sql("SELECT UserID AS UserIDx, AdID AS AdIDx, QueryID AS QueryIDx, (Clicks/Impressions) AS ctr_all FROM (SELECT UserID, AdID, QueryID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1,2,3) GROUP BY 1,2,3,4")
+ctr_UserAd = spark.sql("SELECT UserID AS UserIDx, AdID AS AdIDx, (Clicks/Impressions) AS ctr_UserAd FROM (SELECT UserID, AdID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1,2) GROUP BY 1,2,3")
+ctr_AdQuery = spark.sql("SELECT AdID AS AdIDx, QueryID AS QueryIDx, (Clicks/Impressions) AS ctr_AdQuery FROM (SELECT AdID, QueryID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1,2) GROUP BY 1,2,3")
+ctr_UserQuery = spark.sql("SELECT UserID AS UserIDx, QueryID AS QueryIDx, (Clicks/Impressions) AS ctr_UserQuery FROM (SELECT UserID, QueryID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1,2) GROUP BY 1,2,3")
+ctr_User = spark.sql("SELECT UserID AS UserIDx, (Clicks/Impressions) AS ctr_User FROM (SELECT UserID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+ctr_Ad = spark.sql("SELECT AdID AS AdIDx, (Clicks/Impressions) AS ctr_Ad FROM (SELECT AdID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+ctr_Query = spark.sql("SELECT QueryID AS QueryIDx, (Clicks/Impressions) AS ctr_Query FROM (SELECT QueryID, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+ctr_Pos = spark.sql("SELECT Position AS PositionIDx, (Clicks/Impressions) AS ctr_Pos FROM (SELECT Position, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+ctr_Depth = spark.sql("SELECT Depth AS DepthIDx, (Clicks/Impressions) AS ctr_Depth FROM (SELECT Depth, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+ctr_DepthPos = spark.sql("SELECT DepthPos AS DepthPosx, (Clicks/Impressions) AS ctr_DepthPos FROM (SELECT ((Depth-Position)/Depth) AS DepthPos, sum(Clicks) AS Clicks, sum(Impressions) AS Impressions FROM train_grouped_tbl GROUP BY 1) GROUP BY 1,2")
+
+# 4.2 Joining the training set with the ctr sets
+train_ctr = train_grouped.join(ctr_all, (train_grouped.UserID == ctr_all.UserIDx)&(train_grouped.AdID == ctr_all.AdIDx)&(train_grouped.QueryID == ctr_all.QueryIDx)).drop("UserIDx","AdIDx","QueryIDx")
+train_ctr = train_ctr.join(ctr_UserAd, (train_ctr.UserID == ctr_UserAd.UserIDx)&(train_ctr.AdID == ctr_UserAd.AdIDx)).drop("UserIDx","AdIDx")
+train_ctr = train_ctr.join(ctr_AdQuery, (train_ctr.AdID == ctr_AdQuery.AdIDx)&(train_ctr.QueryID == ctr_AdQuery.QueryIDx)).drop("QueryIDx","AdIDx")
+train_ctr = train_ctr.join(ctr_UserQuery, (train_ctr.UserID == ctr_UserQuery.UserIDx)&(train_ctr.QueryID == ctr_UserQuery.QueryIDx)).drop("UserIDx","QueryIDx")
+train_ctr = train_ctr.join(ctr_User, train_ctr.UserID == ctr_User.UserIDx).drop("UserIDx")
+train_ctr = train_ctr.join(ctr_Ad, train_ctr.AdID == ctr_Ad.AdIDx).drop("AdIDx")
+train_ctr = train_ctr.join(ctr_Query, train_ctr.QueryID == ctr_Query.QueryIDx).drop("QueryIDx")
+train_ctr = train_ctr.join(ctr_Pos, train_ctr.Position == ctr_Pos.PositionIDx).drop("PositionIDx")
+train_ctr = train_ctr.join(ctr_Depth, train_ctr.Depth == ctr_Depth.DepthIDx).drop("DepthIDx")
+train_ctr = train_ctr.join(ctr_DepthPos, train_ctr.DepthPos == ctr_DepthPos.DepthPosx).drop("DepthPosx")
+
+# 4.3 Joining the test set with the ctr sets
+test_ctr = test_grouped.join(ctr_all, (test_grouped.UserID == ctr_all.UserIDx)&(test_grouped.AdID == ctr_all.AdIDx)&(test_grouped.QueryID == ctr_all.QueryIDx)).drop("UserIDx","AdIDx","QueryIDx")
+test_ctr = test_ctr.join(ctr_UserAd, (test_ctr.UserID == ctr_UserAd.UserIDx)&(test_ctr.AdID == ctr_UserAd.AdIDx)).drop("UserIDx","AdIDx")
+test_ctr = test_ctr.join(ctr_AdQuery, (test_ctr.AdID == ctr_AdQuery.AdIDx)&(test_ctr.QueryID == ctr_AdQuery.QueryIDx)).drop("QueryIDx","AdIDx")
+test_ctr = test_ctr.join(ctr_UserQuery, (test_ctr.UserID == ctr_UserQuery.UserIDx)&(test_ctr.QueryID == ctr_UserQuery.QueryIDx)).drop("UserIDx","QueryIDx")
+test_ctr = test_ctr.join(ctr_User, test_ctr.UserID == ctr_User.UserIDx).drop("UserIDx")
+test_ctr = test_ctr.join(ctr_Ad, test_ctr.AdID == ctr_Ad.AdIDx).drop("AdIDx")
+test_ctr = test_ctr.join(ctr_Query, test_ctr.QueryID == ctr_Query.QueryIDx).drop("QueryIDx")
+test_ctr = test_ctr.join(ctr_Pos, test_ctr.Position == ctr_Pos.PositionIDx).drop("PositionIDx")
+test_ctr = test_ctr.join(ctr_Depth, test_ctr.Depth == ctr_Depth.DepthIDx).drop("DepthIDx")
+test_ctr = test_ctr.join(ctr_DepthPos, test_ctr.DepthPos == ctr_DepthPos.DepthPosx).drop("DepthPosx")
+
+train_ctr.createOrReplaceTempView("train_ctr_tbl")
+test_ctr.createOrReplaceTempView("test_ctr_tbl")
+
+# 4.4 Annotating the position and depth normalized click-through-rates for each identifier in the training and test set
+train_normalized = spark.sql("SELECT UserID, AdID, QueryID, Depth, Position, DepthPos, Impressions, Clicks, (Impressions - Clicks) AS NSample, (ctr_all*(Depth/Position)) AS nctr_all, (ctr_UserAd*(Depth/Position)) AS nctr_UserAd, (ctr_AdQuery*(Depth/Position)) AS nctr_AdQuery, (ctr_UserQuery*(Depth/Position)) AS nctr_UserQuery, (ctr_User*(Depth/Position)) AS nctr_User, (ctr_Ad*(Depth/Position)) AS nctr_Ad, (ctr_Query*(Depth/Position)) AS nctr_Query, (ctr_Pos*(Depth/Position)) AS nctr_Pos, (ctr_Depth*(Depth/Position)) AS nctr_Depth, (ctr_DepthPos*(Depth/Position)) AS nctr_DepthPos FROM train_ctr_tbl")
+test_normalized = spark.sql("SELECT UserID, AdID, QueryID, Depth, Position, DepthPos, (ctr_all*(Depth/Position)) AS nctr_all, (ctr_UserAd*(Depth/Position)) AS nctr_UserAd, (ctr_AdQuery*(Depth/Position)) AS nctr_AdQuery, (ctr_UserQuery*(Depth/Position)) AS nctr_UserQuery, (ctr_User*(Depth/Position)) AS nctr_User, (ctr_Ad*(Depth/Position)) AS nctr_Ad, (ctr_Query*(Depth/Position)) AS nctr_Query, (ctr_Pos*(Depth/Position)) AS nctr_Pos, (ctr_Depth*(Depth/Position)) AS nctr_Depth, (ctr_DepthPos*(Depth/Position)) AS nctr_DepthPos FROM test_ctr_tbl")
+
+### STEP 5 - Preparing the data sets for use in machine learning pipelines
+# 5.1 Loading the user profile data and preparing it to be attached to the training set
+user_profile = spark.read.format("csv").load("/mnt/%s/userid_profile.txt" % MOUNT_NAME,header = None, sep="\t")
+user_profile = user_profile.withColumn("UserIDx", user_profile["_c0"].cast("int"))
+user_profile = user_profile.withColumn("Gender", user_profile["_c1"].cast("int"))
+user_profile = user_profile.withColumn("Age", user_profile["_c2"].cast("int"))
+user_profile = user_profile.select("UserIDx","Gender","Age")
+
+# 5.2 Joining the user profile data with the training and test sets
+train_full = train_normalized.join(user_profile, train_normalized.UserID == user_profile.UserIDx).drop("UserIDx")
+train_full.createOrReplaceTempView("train_full_tbl")
+train_clicksOnly = spark.sql("SELECT * FROM train_full_tbl WHERE Clicks > 0")
+test = test_normalized.join(user_profile, test_normalized.UserID == user_profile.UserIDx).drop("UserIDx")
+
+# 5.3 Writing the complete final data sets to S3 for later loading, due to faster run-time
+test.coalesce(1).write.format("csv").save("/mnt/%s/test" % MOUNT_NAME, header = 'TRUE', sep='\t')
+train_clicksOnly.coalesce(1).write.format("csv").save("/mnt/%s/train_clicksOnly" % MOUNT_NAME, header = 'TRUE', sep='\t')
+
+# 5.4 Loading further modules required for data set preparation for machine learning pipelines
+from pyspark.ml.feature import VectorAssembler, MinMaxScaler
+from pyspark.sql.functions import udf, explode, variance
+from pyspark.sql.types import ArrayType, IntegerType, DoubleType
+from pyspark.mllib.stat import Statistics
+
+# 5.5 Loading the training and test set back from S3 and formatting the columns and data types
+train = spark.read.format("csv").load("/mnt/%s/train_clicksOnly/train.csv" % MOUNT_NAME,header = 'TRUE', sep="\t")
+test = spark.read.format("csv").load("/mnt/%s/test/test.csv" % MOUNT_NAME,header = 'TRUE', sep="\t")
+
+train = train.withColumn("UserID", train["UserID"].cast("int")) 
+train = train.withColumn("AdID", train["AdID"].cast("int"))
+train = train.withColumn("QueryID", train["QueryID"].cast("int"))
+train = train.withColumn("Depth", train["Depth"].cast("int"))
+train = train.withColumn("Position", train["Position"].cast("int"))
+train = train.withColumn("DepthPos", train["DepthPos"].cast("Double"))
+train = train.withColumn("Impressions", train["Impressions"].cast("int"))
+train = train.withColumn("Clicks", train["Clicks"].cast("int"))
+train = train.withColumn("NSample", train["NSample"].cast("int"))
+train = train.withColumn("nctr_all", train["nctr_all"].cast("Double"))
+train = train.withColumn("nctr_UserAd", train["nctr_UserAd"].cast("Double"))
+train = train.withColumn("nctr_AdQuery", train["nctr_AdQuery"].cast("Double"))
+train = train.withColumn("nctr_UserQuery", train["nctr_UserQuery"].cast("Double"))
+train = train.withColumn("nctr_User", train["nctr_User"].cast("Double"))
+train = train.withColumn("nctr_Ad", train["nctr_Ad"].cast("Double"))
+train = train.withColumn("nctr_Query", train["nctr_Query"].cast("Double"))
+train = train.withColumn("nctr_Pos", train["nctr_Pos"].cast("Double"))
+train = train.withColumn("nctr_Depth", train["nctr_Depth"].cast("Double"))
+train = train.withColumn("nctr_DepthPos", train["nctr_DepthPos"].cast("Double"))
+train = train.withColumn("Gender", train["Gender"].cast("int"))
+train = train.withColumn("Age", train["Age"].cast("int"))
+cols = ["UserID",'AdID','QueryID','Depth','Position','DepthPos','Impressions','Clicks','NSample','nctr_all','nctr_UserAd','nctr_AdQuery','nctr_UserQuery','nctr_User','nctr_Ad','nctr_Query','nctr_Pos','nctr_Depth','nctr_DepthPos','Gender','Age']
+train = train.select(cols)
+
+test = test.withColumn("UserID", test["UserID"].cast("int")) 
+test = test.withColumn("AdID", test["AdID"].cast("int"))
+test = test.withColumn("QueryID", test["QueryID"].cast("int"))
+test = test.withColumn("Depth", test["Depth"].cast("int"))
+test = test.withColumn("Position", test["Position"].cast("int"))
+test = test.withColumn("DepthPos", test["DepthPos"].cast("Double"))
+test = test.withColumn("nctr_all", test["nctr_all"].cast("Double"))
+test = test.withColumn("nctr_UserAd", test["nctr_UserAd"].cast("Double"))
+test = test.withColumn("nctr_AdQuery", test["nctr_AdQuery"].cast("Double"))
+test = test.withColumn("nctr_UserQuery", test["nctr_UserQuery"].cast("Double"))
+test = test.withColumn("nctr_User", test["nctr_User"].cast("Double"))
+test = test.withColumn("nctr_Ad", test["nctr_Ad"].cast("Double"))
+test = test.withColumn("nctr_Query", test["nctr_Query"].cast("Double"))
+test = test.withColumn("nctr_Pos", test["nctr_Pos"].cast("Double"))
+test = test.withColumn("nctr_Depth", test["nctr_Depth"].cast("Double"))
+test = test.withColumn("nctr_DepthPos", test["nctr_DepthPos"].cast("Double"))
+test = test.withColumn("Gender", test["Gender"].cast("int"))
+test = test.withColumn("Age", test["Age"].cast("int"))
+cols_test = ["UserID",'AdID','QueryID','Depth','Position','DepthPos','nctr_all','nctr_UserAd','nctr_AdQuery','nctr_UserQuery','nctr_User','nctr_Ad','nctr_Query','nctr_Pos','nctr_Depth','nctr_DepthPos','Gender','Age']
+test = test.select(cols_test)
+
+# 5.6 Splitting the training set into positive (#clicks) and negative (#impressions - #clicks) samples, using user-defined-functions
+print train.count() # The number of rows in the training set, considering only examples with clicks and identifiable users
+
+impsInd = udf(lambda Impressions: range(0,Impressions), ArrayType(IntegerType()))
+toClicks = udf(lambda Impressed, Clicks: 1 if Impressed < Clicks else 0, IntegerType())
+
+train_exploded = train.withColumn('Impressed', explode(impsInd('Impressions')))
+train_mapped = train_exploded.withColumn('label', toClicks('Impressed','Clicks'))
+print("Split train instances into positive and negative samples")
+
+# 5.7 Printing summary statistics for the training set for empirical use
+cols_train = ["Clicks","Impressions","Impressed","label","nctr_all","nctr_UserAd","nctr_AdQuery","nctr_UserQuery","nctr_User","nctr_Ad","nctr_Query","nctr_Pos","nctr_Depth","nctr_DepthPos"]
+train_stats = train_mapped.describe(cols_train)
+display(train_stats)
+
+train_rdd = train_mapped.rdd
+display(train_rdd.variance(cols_train))
+
+# 5.8 Choosing the features for the ML model and assembling the data sets into feature vectors and labels
+# Features not used in first model: "AdID","Depth","Position","QueryID","UserID","DepthPos","Gender","Age",
+assembler = VectorAssembler(
+    inputCols=["AdID","Depth","Position","QueryID","UserID","DepthPos","Gender","Age","nctr_all","nctr_UserAd","nctr_AdQuery","nctr_UserQuery","nctr_User","nctr_Ad","nctr_Query","nctr_Pos","nctr_Depth","nctr_DepthPos"],
+    outputCol="features")
+
+output = assembler.transform(train_mapped)
+train = output.select("features", "label")
+print("Assembled trainset to vector column 'features'")
+
+output_test = assembler.transform(test)
+test = output_test.select("features")
+print("Assembled testset to vector column 'features'")
+
+# 5.9 Splitting the training set into train set and validation set using a 1/11 split according to the paper by Taiwan University
+train, validate = train.randomSplit([0.9,0.1], seed = 100)
+print("Train data split into train and validate set")
+
+### STEP 6 - Building and training the machine learning model, chosen here: Logistic Regression
+# 6.1 Creating the experiment parameters and chosing the model
+from pyspark.ml.classification import LogisticRegression
+from pyspark.ml.evaluation import BinaryClassificationEvaluator
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+
+lr = LogisticRegression(labelCol="label", featuresCol="features", maxIter=10)
+
+evaluator = BinaryClassificationEvaluator()
+paramGrid = (ParamGridBuilder()
+             .addGrid(lr.regParam, [0.01, 0.5, 2.0])
+             .addGrid(lr.elasticNetParam, [0.0, 0.5, 1.0])
+             .addGrid(lr.maxIter, [1, 5, 10])
+             .build())
+print("Classifier, evaluator and parameters set.")
+
+cv = CrossValidator(estimator=lr, estimatorParamMaps=paramGrid, evaluator=evaluator, numFolds=5)
+print("Created cross validation model")
+
+# 6.2 Training the model
+cvModel = cv.fit(train)
+print("Cross-validation model trained")
+
+# 6.3 Creating the predictions on the validation set
+predictions = cvModel.transform(validate)
+print("Predictions done on validation set.")
+
+# 6.4 Printing area under the ROC curve for cvModel
+print "Metric used for performance evaluation: " evaluator.getMetricName()
+print "Training set AUC for best model: ", evaluator.evaluate(cvModel.transform(train))
+print "Validation set AUC for best model: ", evaluator.evaluate(predictions)
+
+# 6.5 How to create summary for the best model?
+trainSummary = cvModel.bestModel.summary
+print "Area under the ROC curve for the best model version: ", trainSummary.areaUnderROC
+
+# 6.6 Displaying five rows of the predictions on the validation set
+selected = predictions.select("label", "prediction", "probability")
+selected.show(5)
