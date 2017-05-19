@@ -1,0 +1,274 @@
+### STEP 1 - CREATING ACCESS TO AWS S3 AND AWS EC2 INSTANCES ###
+
+# Defining access parameters and login credentials - The values have been deleted by me for security purposes
+ACCESS_KEY = ""
+SECRET_KEY = ""
+ENCODED_SECRET_KEY = SECRET_KEY.replace("/", "%2F")
+AWS_BUCKET_NAME = ""
+MOUNT_NAME = "cs5304-afour"
+
+# Mounting the AWS S3 bucket to the databricks notebook
+dbutils.fs.mount("s3a://%s:%s@%s" % (ACCESS_KEY, ENCODED_SECRET_KEY, AWS_BUCKET_NAME), "/mnt/%s" % MOUNT_NAME)
+
+# Importing the required Spark modules
+from pyspark import SparkContext
+from pyspark.sql import SparkSession
+spark = SparkSession(sc)
+
+# Loading the training set
+train = spark.read.format("csv").load("/mnt/%s/train.csv" % MOUNT_NAME,header = True)
+
+# Looking at the format of the training set and adjusting it accordingly
+train = train.withColumn("Id", train["Id"].cast("int"))
+train = train.withColumn("MSSubClass", train["MSSubClass"].cast("int"))
+train = train.withColumn("LotFrontage", train["LotFrontage"].cast("int"))
+train = train.withColumn("LotArea", train["LotArea"].cast("int"))
+train = train.withColumn("OverallQual", train["OverallQual"].cast("int"))
+train = train.withColumn("OverallCond", train["OverallCond"].cast("int"))
+train = train.withColumn("YearBuilt", train["YearBuilt"].cast("Double"))
+train = train.withColumn("YearRemodAdd", train["YearRemodAdd"].cast("int"))
+train = train.withColumn("MasVnrArea", train["MasVnrArea"].cast("int"))
+train = train.withColumn("BsmtFinSF1", train["BsmtFinSF1"].cast("int"))
+train = train.withColumn("BsmtFinSF2", train["BsmtFinSF2"].cast("int"))
+train = train.withColumn("BsmtUnfSF", train["BsmtUnfSF"].cast("int"))
+train = train.withColumn("TotalBsmtSF", train["TotalBsmtSF"].cast("Double"))
+train = train.withColumn("1stFlrSF", train["1stFlrSF"].cast("int"))
+train = train.withColumn("2ndFlrSF", train["2ndFlrSF"].cast("int"))
+train = train.withColumn("LowQualFinSF", train["LowQualFinSF"].cast("int"))
+train = train.withColumn("GrLivArea", train["GrLivArea"].cast("Double"))
+train = train.withColumn("BsmtFullBath", train["BsmtFullBath"].cast("int"))
+train = train.withColumn("BsmtHalfBath", train["BsmtHalfBath"].cast("int"))
+train = train.withColumn("FullBath", train["FullBath"].cast("int"))
+train = train.withColumn("HalfBath", train["HalfBath"].cast("int"))
+train = train.withColumn("BedroomAbvGr", train["BedroomAbvGr"].cast("int"))
+train = train.withColumn("KitchenAbvGr", train["KitchenAbvGr"].cast("int"))
+train = train.withColumn("TotRmsAbvGrd", train["TotRmsAbvGrd"].cast("int"))
+train = train.withColumn("Fireplaces", train["Fireplaces"].cast("int"))
+train = train.withColumn("GarageYrBlt", train["GarageYrBlt"].cast("int"))
+train = train.withColumn("GarageCars", train["GarageCars"].cast("int"))
+train = train.withColumn("GarageArea", train["GarageArea"].cast("int"))
+train = train.withColumn("WoodDeckSF", train["WoodDeckSF"].cast("int"))
+train = train.withColumn("OpenPorchSF", train["OpenPorchSF"].cast("int"))
+train = train.withColumn("EnclosedPorch", train["EnclosedPorch"].cast("int"))
+train = train.withColumn("3SsnPorch", train["3SsnPorch"].cast("int"))
+train = train.withColumn("ScreenPorch", train["ScreenPorch"].cast("int"))
+train = train.withColumn("PoolArea", train["PoolArea"].cast("int"))
+train = train.withColumn("MiscVal", train["MiscVal"].cast("int"))
+train = train.withColumn("MoSold", train["MoSold"].cast("int"))
+train = train.withColumn("YrSold", train["YrSold"].cast("int"))
+train = train.withColumn("SalePrice", train["SalePrice"].cast("Double"))
+num_cols = ["Id","MSSubClass","LotFrontage","LotArea","OverallQual","OverallCond","YearBuilt","YearRemodAdd","MasVnrArea","BsmtFinSF1","BsmtFinSF2","BsmtUnfSF","TotalBsmtSF","1stFlrSF","2ndFlrSF","LowQualFinSF","GrLivArea","BsmtFullBath","BsmtHalfBath","FullBath","HalfBath","BedroomAbvGr","KitchenAbvGr","TotRmsAbvGrd","Fireplaces","GarageYrBlt","GarageCars","GarageArea","WoodDeckSF","OpenPorchSF","EnclosedPorch","3SsnPorch","ScreenPorch","PoolArea","MiscVal","MoSold","YrSold","SalePrice"]
+cat_cols = ['MSZoning','Street','Alley','LotShape','LandContour','Utilities','LotConfig','LandSlope','Neighborhood','Condition1','Condition2','BldgType','HouseStyle','RoofStyle','RoofMatl','Exterior1st','Exterior2nd','MasVnrType','ExterQual','ExterCond','Foundation','BsmtQual','BsmtCond','BsmtExposure','BsmtFinType1','BsmtFinType2','Heating','HeatingQC','CentralAir','Electrical','KitchenQual','Functional','FirePlaceQu','GarageType','GarageFinish','GarageQual','GarageCond','PavedDrive','PoolQC','Fence','MiscFeature','SaleType','SaleCondition']
+
+# Select features for experiment
+chosen_features = ["SalePrice","OverallQual","YearBuilt","TotalBsmtSF","GrLivArea","Street","Neighborhood","HouseStyle"]
+train_raw = train.select(chosen_features)
+
+# View summary statistics for the data set
+train_sumstats = train_raw.describe()
+train_sumstats.show()
+
+# Looking at different segments of the data
+train_raw.createOrReplaceTempView("train_tbl")
+segments_Above365K = spark.sql("SELECT count(SalePrice) AS Above365K FROM train_tbl WHERE SalePrice >= 365000")
+segments_220Kto365K = spark.sql("SELECT count(SalePrice) AS Between220and365 FROM train_tbl WHERE SalePrice < 365000 AND SalePrice >= 220000")
+segments_120Kto220K = spark.sql("SELECT count(SalePrice) AS Between120and220 FROM train_tbl WHERE SalePrice < 220000 AND SalePrice >= 120000")
+segments_Below120K = spark.sql("SELECT count(SalePrice) AS Below120K FROM train_tbl WHERE SalePrice < 120000")
+
+# Applying feature engineering techniques OneHotEncoding and StringIndexing, lastly vector assembling it for ML model purposes
+from pyspark.ml.feature import OneHotEncoder, StringIndexer, VectorAssembler
+
+indexer = StringIndexer(inputCol="Street", outputCol="Street_Index")
+indexed = indexer.fit(train_raw).transform(train_raw)
+indexer = StringIndexer(inputCol="Neighborhood", outputCol="Neighborhood_Index")
+indexed = indexer.fit(indexed).transform(indexed)
+indexer = StringIndexer(inputCol="HouseStyle", outputCol="HouseStyle_Index")
+indexed = indexer.fit(indexed).transform(indexed)
+indexed = indexed.drop('Street','Neighborhood','HouseStyle')
+
+# Continued from above
+encoder = OneHotEncoder(inputCol="Street_Index", outputCol="street")
+encoded = encoder.transform(indexed)
+encoder = OneHotEncoder(inputCol="Neighborhood_Index", outputCol="neighborhood")
+encoded = encoder.transform(encoded)
+encoder = OneHotEncoder(inputCol="HouseStyle_Index", outputCol="style")
+encoded = encoder.transform(encoded)
+
+encoded_df = encoded.drop("Street_Index","Neighborhood_Index","HouseStyle_Index")
+
+# Continued from above
+from pyspark.ml.feature import VectorAssembler, Normalizer, StandardScaler, Bucketizer
+
+encoded_df = encoded_df.withColumn("label", encoded_df["SalePrice"])
+
+assembler = VectorAssembler(
+    inputCols=["OverallQual","YearBuilt","TotalBsmtSF","GrLivArea","street","neighborhood","style"], outputCol="features")
+
+train_raw_features = assembler.transform(encoded_df)
+train_raw_features = train_raw_features.select("label","features")
+
+# Assembling feature vectors for categorical and numerical features
+assembler_num = VectorAssembler(
+    inputCols=["OverallQual","YearBuilt","TotalBsmtSF","GrLivArea"], outputCol="features_num")
+assembled_num = assembler_num.transform(encoded_df)
+assembled_num = assembled_num.select("label","features_num","street","neighborhood","style")
+
+assembler_cat = VectorAssembler(
+    inputCols=["street","neighborhood","style"], outputCol="features_cat")
+assembled_cat = assembler_cat.transform(assembled_num)
+assembled_df = assembled_cat.select("label","features_num","features_cat")
+
+# Applying feature engineering technique "normalization" on features
+normalizer = Normalizer(inputCol='features_num', outputCol='norm_Features', p=1.0)
+nrm_df = normalizer.transform(assembled_df)
+
+assembler = VectorAssembler(
+    inputCols=["norm_Features","features_cat"], outputCol="normFeatures")
+
+train_norm = assembler.transform(nrm_df)
+train_norm = train_norm.select("label","normFeatures")
+
+# Applying feature engineering technique "scaling" to features
+scaler = StandardScaler(inputCol="features_num", outputCol="scaled_Features",
+                        withStd=False, withMean=True)
+scalerModel = scaler.fit(assembled_df)
+scaled = scalerModel.transform(assembled_df)
+
+assembler = VectorAssembler(
+    inputCols=["scaled_Features","features_cat"], outputCol="scaledFeatures")
+train_scaled = assembler.transform(scaled)
+train_scaled = train_scaled.select("label","scaledFeatures")
+
+# Applying feature engineering technique "bucketizing" on feature, turning the problem into a "lesser" prediction problem
+# This technique generalizes further the data and therefore works well with generalized models, however creates GREAT bias.
+from pyspark.ml.feature import Bucketizer
+
+splits_year = [-float("inf"), 1902, 1932, 1962, 1992, float("inf")]
+splits_bsmt = [-float("inf"), 1000, 2000, 3000, 4000, 5000, float("inf")]
+splits_grliv = [-float("inf"), 1000, 2000, 3000, 4000, 5000, float("inf")]
+
+bucketizer_year = Bucketizer(splits=splits_year, inputCol="YearBuilt", outputCol="bucketedYear")
+train_bucketed_year = bucketizer_year.transform(encoded_df)
+
+bucketizer_TotalbsmtSF = Bucketizer(splits=splits_bsmt, inputCol="TotalBsmtSF", outputCol="bucketedBSMT")
+train_bucketed_bsmt = bucketizer_TotalbsmtSF.transform(train_bucketed_year)
+
+bucketizer_grliv = Bucketizer(splits=splits_grliv, inputCol="GrLivArea", outputCol="bucketedGrLiv")
+train_bucketed = bucketizer_grliv.transform(train_bucketed_bsmt)
+
+train_bucketed = train_bucketed.select("label","OverallQual","bucketedYear","bucketedBSMT","bucketedGrLiv","street","style","neighborhood")
+
+assembler = VectorAssembler(
+    inputCols=["OverallQual","bucketedYear","bucketedBSMT","bucketedGrLiv","street","style","neighborhood"], outputCol="bucketedFeatures")
+train_bucketed = assembler.transform(train_bucketed)
+train_bucketed = train_bucketed.select("label","bucketedFeatures")
+
+# Split the data set into training and validation
+train_rf, validate_rf = train_raw_features.randomSplit([0.9,0.1], seed = 150)
+train_nrm, validate_nrm = train_norm.randomSplit([0.9,0.1], seed = 151)
+train_bck, validate_bck = train_bucketed.randomSplit([0.9,0.1], seed = 152)
+train_scl, validate_scl = train_scaled.randomSplit([0.9,0.1], seed = 153)
+
+print("Train data split into train and validate sets")
+
+from pyspark.ml.regression import LinearRegression
+from pyspark.ml.tuning import CrossValidator, ParamGridBuilder
+from pyspark.ml.evaluation import RegressionEvaluator
+
+# Setting the models and parameters
+lr_raw = LinearRegression(labelCol="label", featuresCol="features")
+lr_nrm = LinearRegression(labelCol="label", featuresCol="normFeatures")
+lr_bck = LinearRegression(labelCol="label", featuresCol="bucketedFeatures")
+lr_scl = LinearRegression(labelCol="label", featuresCol="scaledFeatures")
+
+evaluator = RegressionEvaluator()
+paramGrid_raw = (ParamGridBuilder()
+             .addGrid(lr_raw.regParam, [0.01, 0.5, 2.0]) # Regularization parameters
+             .addGrid(lr_raw.elasticNetParam, [0.0, 1.0]) # Trying both L2 Ridge and L1 Lasso
+             .addGrid(lr_raw.maxIter, [1, 5, 10]) # Trying different numbers of iterations
+             .build())
+paramGrid_nrm = (ParamGridBuilder()
+             .addGrid(lr_nrm.regParam, [0.01, 0.5, 2.0]) # Trying multiple regularization parameters
+             .addGrid(lr_nrm.elasticNetParam, [0.0, 1.0]) # Trying both L2 Ridge Regression and L1 Lasso Regression
+             .addGrid(lr_nrm.maxIter, [1, 5, 10]) # Trying different amounts of iterations
+             .build())
+paramGrid_bck = (ParamGridBuilder()
+             .addGrid(lr_bck.regParam, [0.01, 0.5, 2.0]) # Trying multiple regularization parameters
+             .addGrid(lr_bck.elasticNetParam, [0.0, 1.0]) # Trying both L2 Ridge Regression and L1 Lasso Regression
+             .addGrid(lr_bck.maxIter, [1, 5, 10]) # Trying different amounts of iterations
+             .build())
+paramGrid_scl = (ParamGridBuilder()
+             .addGrid(lr_scl.regParam, [0.01, 0.5, 2.0]) # Trying multiple regularization parameters
+             .addGrid(lr_scl.elasticNetParam, [0.0, 1.0]) # Trying both L2 Ridge Regression and L1 Lasso Regression
+             .addGrid(lr_scl.maxIter, [1, 5, 10]) # Trying different amounts of iterations
+             .build())
+print("Regression models, parameters and evaluators set.")
+
+# Building the model
+cv_raw = CrossValidator(estimator=lr_raw, estimatorParamMaps=paramGrid_raw, evaluator=evaluator, numFolds=5)
+cv_nrm = CrossValidator(estimator=lr_nrm, estimatorParamMaps=paramGrid_nrm, evaluator=evaluator, numFolds=5)
+cv_bck = CrossValidator(estimator=lr_bck, estimatorParamMaps=paramGrid_bck, evaluator=evaluator, numFolds=5)
+cv_scl = CrossValidator(estimator=lr_scl, estimatorParamMaps=paramGrid_scl, evaluator=evaluator, numFolds=5)
+print("Created cross validation models")
+
+# Training the model
+cvModel_raw = cv_raw.fit(train_rf)
+cvModel_nrm = cv_nrm.fit(train_nrm)
+cvModel_bck = cv_bck.fit(train_bck)
+cvModel_scl = cv_scl.fit(train_scl)
+
+print("Cross-validation models trained")
+
+# Creating the predictions on the validation set
+pred_raw = cvModel_raw.transform(validate_rf)
+pred_nrm = cvModel_nrm.transform(validate_nrm)
+pred_bck = cvModel_bck.transform(validate_bck)
+pred_scl = cvModel_scl.transform(validate_scl)
+
+print("Predictions done on validation set.")
+
+# Extracting best models from the cross validator model
+bm_raw = cvModel_raw.bestModel
+bm_nrm = cvModel_nrm.bestModel
+bm_bck = cvModel_bck.bestModel
+bm_scl = cvModel_scl.bestModel
+
+# Overview of results from model using feature engineering techniques: String-Indexing, One-hot-encoding
+print "Metric used for performance evaluation:", evaluator.getMetricName()
+print 'Raw features best model param (regParam): ', bm_raw._java_obj.getRegParam()
+print 'Raw features best model param (MaxIter): ', bm_raw._java_obj.getMaxIter()
+print 'Raw features best model param (elasticNetParam): ', bm_raw._java_obj.getElasticNetParam()
+print 'Raw features best model Root-Mean-Square-Error on validation set: ', evaluator.evaluate(bm_raw.transform(validate_rf))
+print 'Raw features best model Root-Mean-Square-Error on training set: ', evaluator.evaluate(bm_raw.transform(train_rf))
+print 'Raw features best model intercept: ', bm_raw.intercept
+#print 'Raw features best model coefficients: ', bm_raw.coefficients
+#pred_raw.show()
+
+# Overview of results from model using feature engineering techniques: Normalization
+print 'Normalized features best model param (regParam): ', bm_nrm._java_obj.getRegParam()
+print 'Normalized features best model param (MaxIter): ', bm_nrm._java_obj.getMaxIter()
+print 'Normalized features best model param (elasticNetParam): ', bm_nrm._java_obj.getElasticNetParam()
+print 'Normalized features best model Root-Mean-Square-Error on validation set: ', evaluator.evaluate(bm_nrm.transform(validate_nrm))
+print 'Normalized features best model Root-Mean-Square-Error on training set: ', evaluator.evaluate(bm_nrm.transform(train_nrm))
+print 'Normalized features best model intercept: ', bm_nrm.intercept
+#print 'Normalized features best model coefficients: ', bm_nrm.coefficients
+#pred_nrm.show()
+
+# Overview of results from model using feature engineering techniques: Bucketizing
+print 'Bucketed features best model param (regParam): ', bm_bck._java_obj.getRegParam()
+print 'Bucketed features best model param (MaxIter): ', bm_bck._java_obj.getMaxIter()
+print 'Bucketed features best model param (elasticNetParam): ', bm_bck._java_obj.getElasticNetParam()
+print 'Bucketed features best model Root-Mean-Square-Error on validation set: ', evaluator.evaluate(bm_bck.transform(validate_bck))
+print 'Bucketed features best model Root-Mean-Square-Error on training set: ', evaluator.evaluate(bm_bck.transform(train_bck))
+print 'Bucketed features best model intercept: ', bm_bck.intercept
+#print 'Bucketed features best model coefficients: ', bm_bck.coefficients
+#pred_bck.show()
+
+# Overview of results from model using feature engineering techniques: Scaling
+print 'Scaled features best model param (regParam): ', bm_scl._java_obj.getRegParam()
+print 'Scaled features best model param (MaxIter): ', bm_scl._java_obj.getMaxIter()
+print 'Scaled features best model param (elasticNetParam): ', bm_scl._java_obj.getElasticNetParam()
+print 'Scaled features best model Root-Mean-Square-Error on validation set: ', evaluator.evaluate(bm_scl.transform(validate_scl))
+print 'Scaled features best model Root-Mean-Square-Error on training set: ', evaluator.evaluate(bm_scl.transform(train_scl))
+print 'Scaled features best model intercept: ', bm_scl.intercept
+#print 'Scaled features best model coefficients: ', bm_scl.coefficients
